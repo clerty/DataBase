@@ -12,10 +12,17 @@ namespace DB
         public Dictionary<Type, List<Record>> Records { get; private set; }
         public Dictionary<Type, List<Relationship>> Relationships { get; private set; }
 
+        List<Record> createdRecords, deletedRecords;
+        List<Relationship> addedRelationships, changedRelationships;
+
         public DataBase()
         {
             Records = new Dictionary<Type, List<Record>>();
             Relationships = new Dictionary<Type, List<Relationship>>();
+            createdRecords = new List<Record>();
+            deletedRecords = new List<Record>();
+            addedRelationships = new List<Relationship>();
+            changedRelationships = new List<Relationship>();
             Path = String.Empty;
         }
 
@@ -28,21 +35,88 @@ namespace DB
             Path = dbPath;
         }
 
+        public void Fill(string path)
+        {
+            Path = path;
+            FillRecords();
+            FillRelationships();
+        }
+
+        void FillRecords()
+        {
+            Assembly typeAssembly = this.GetType().Assembly;
+            string recordTypeString;
+            Type recordType;
+            Record recordToAdd;
+            List<Record> recordsToAdd;
+
+            string recordsDirectory = System.IO.Path.Combine(Path, "Records");
+            if (Directory.Exists(recordsDirectory))
+                foreach (string recordDirectory in Directory.GetDirectories(recordsDirectory))
+                {
+                    recordTypeString = recordDirectory.Substring(recordDirectory.LastIndexOf('\\') + 1);
+                    recordType = typeAssembly.GetType(typeAssembly.GetName().Name + "." + recordTypeString);
+
+                    recordsToAdd = new List<Record>();
+                    foreach (string recordFile in Directory.GetFiles(recordDirectory))
+                    {
+                        recordToAdd = (Record)Activator.CreateInstance(recordType);
+                        recordToAdd.ReadFromFile(new StreamReader(recordFile));
+                        recordsToAdd.Add(recordToAdd);
+                    }
+
+                    Records[recordType] = recordsToAdd;
+                }
+        }
+
+        void FillRelationships()
+        {
+            Assembly typeAssembly = this.GetType().Assembly;
+            string relationshipTypeString;
+            Type relationshipType;
+            Relationship relationship;
+            string recordTypeString;
+            string[] recordFields;
+            Record recordToAdd;
+            List<Record> recordsToAdd;
+
+            string relationshipsDirectory = System.IO.Path.Combine(Path, "Relationships");
+            if (Directory.Exists(relationshipsDirectory))
+                foreach (string relationshipDirectory in Directory.GetDirectories(relationshipsDirectory))
+                {
+                    relationshipTypeString = relationshipDirectory.Substring(relationshipDirectory.LastIndexOf('\\') + 1);
+                    relationshipType = typeAssembly.GetType(typeAssembly.GetName().Name + "." + relationshipTypeString);
+                    Relationships.Add(relationshipType, new List<Relationship>());
+
+                    foreach (string relationshipFile in Directory.GetFiles(relationshipDirectory))
+                    {
+                        relationship = (Relationship)Activator.CreateInstance(relationshipType);
+
+                        recordTypeString = relationshipTypeString.Substring(0, relationshipTypeString.IndexOf('_'));
+                        recordFields = relationshipFile.Substring(relationshipFile.LastIndexOf('\\') + 1, relationshipFile.LastIndexOf('.') - relationshipFile.LastIndexOf('\\') - 1).Split('^');
+                        recordToAdd = (Record)typeof(DataBase).GetMethod("FindByKey").MakeGenericMethod(typeAssembly.GetType(typeAssembly.GetName().Name + "." + recordTypeString)).Invoke(this, new object[] { recordFields });
+
+                        recordsToAdd = new List<Record>();
+                        recordTypeString = relationshipTypeString.Substring(relationshipTypeString.IndexOf('_') + 1);
+                        foreach (string recordString in File.ReadAllLines(relationshipFile))
+                            recordsToAdd.Add((Record)typeof(DataBase).GetMethod("FindByKey").MakeGenericMethod(typeAssembly.GetType(typeAssembly.GetName().Name + "." + recordTypeString)).Invoke(this, new object[] { recordString.Split('^') }));
+
+                        relationship.AddMembers(recordToAdd, recordsToAdd.ToArray());
+
+                        Relationships[relationshipType].Add(relationship);
+                    }
+                }
+        }
+
         public Record Create<T>(params string[] fieldsValues) where T : Record, new()
         {
             Record record = new T();
             record.SetValues(fieldsValues);
 
             if (!Records.ContainsKey(typeof(T)))
-            {
-                Directory.CreateDirectory(System.IO.Path.Combine(Path, "Records", typeof(T).Name));
                 Records.Add(typeof(T), new List<Record>());
-            }
             Records[typeof(T)].Add(record);
-
-            string path = System.IO.Path.Combine(Path, "Records", typeof(T).Name, record.GetKeyString() + "_temp.txt");
-            FileStream fs = new FileStream(path, FileMode.Create, FileAccess.Write);
-            record.WriteToFile(new StreamWriter(fs));
+            createdRecords.Add(record);
 
             return record;
         }
@@ -50,60 +124,29 @@ namespace DB
         public void AddToRelationship<T>(Record parent, params Record[] childs) where T : Relationship, new()
         {
             Relationship relationship = new T();
-            relationship.AddMembers(parent, childs);
 
             if (!Relationships.ContainsKey(typeof(T)))
-            {
-                Directory.CreateDirectory(System.IO.Path.Combine(Path, "Relationships", typeof(T).Name));
                 Relationships.Add(typeof(T), new List<Relationship>());
-            }
-            bool found = false;
-            foreach (Relationship rs in Relationships[typeof(T)])
+
+            relationship = Relationships[typeof(T)].Find(rs => rs.Parent == parent);
+            if (relationship.Equals(default(Relationship)))
             {
-                found |= rs.Parent == parent;
-                if (found)
-                {
-                    foreach (Record record in childs)
-                        rs.Childs.Add(record);
-                    break;
-                }
-            }
-            if (!found)
+                relationship.AddMembers(parent, childs);
                 Relationships[typeof(T)].Add(relationship);
-
-
-            string path = System.IO.Path.Combine(Path, "Relationships", typeof(T).Name, relationship.Parent.GetKeyString() + "_temp.txt");
-            FileStream fs = new FileStream(path, FileMode.Create, FileAccess.Write);
-            relationship.WriteToFile(new StreamWriter(fs));
-        }
-
-        public List<Record> FindByField<T>(string field, string value) where T : Record
-        {
-            List<Record> foundRecords = new List<Record>();
-            foreach (Record record in Records[typeof(T)])
-                if (record[field].Value == value)
-                    foundRecords.Add(record);
-            return foundRecords;
-        }
-
-        public Record FindByKey<T>(params string[] values) where T : Record
-        {
-            foreach (Record record in Records[typeof(T)])
-            {
-                //foreach (Field field in record.Key)
-                //{
-                //    found &= field.Value == values[i];
-                //    if (!found)
-                //        break;
-                //    i++;
-                //}
-                string[] fields = record.Key.ConvertAll<string>(x => x.Value).ToArray();
-                if (fields.SequenceEqual(values))
-                    return record;
+                addedRelationships.Add(relationship);
             }
-            return null;
-        }
+            else
+            {
+                relationship.Childs.AddRange(childs);
+                changedRelationships.Add(relationship);
+            }
 
+
+            //string path = System.IO.Path.Combine(Path, "Relationships", typeof(T).Name, relationship.Parent.GetKeyString() + "_temp.txt");
+            //FileStream fs = new FileStream(path, FileMode.Create, FileAccess.Write);
+            //relationship.WriteToFile(new StreamWriter(fs));
+        }
+        
         //void RemoveChildFromRelationship<T>(Record record) where T : Relationship
         //{
         //    foreach (Relationship relationship in Relationships[typeof(T)])
@@ -117,6 +160,7 @@ namespace DB
         public void Delete(Record record)
         {
             Records[record.GetType()].Remove(record);
+            deletedRecords.Add(record);
 
             foreach (Type type in Relationships.Keys)
                 foreach (Relationship relationship in Relationships[type])
@@ -138,59 +182,40 @@ namespace DB
                     }
         }
 
-        public void Fill<T>(string path) where T : DataBase
+        public List<Record> FindByField<T>(string field, string value) where T : Record
         {
-            Assembly typeAssembly = typeof(T).Assembly;
+            return Records[typeof(T)].FindAll(record => record[field].Value == value);
+        }
 
-            string typeString;
-            Type type;
-            List<Record> recordsToAdd;
-            Record recordToAdd;
+        public Record FindByKey<T>(params string[] values) where T : Record
+        {
+            return Records[typeof(T)].Find(record => record.Key.ConvertAll<string>(x => x.Value).ToArray().SequenceEqual(values));
+        }
 
-            foreach (string recordDirectory in Directory.GetDirectories(System.IO.Path.Combine(path, "Records")))
+        
+        public void Save()
+        {
+            string path = System.IO.Path.Combine(Path, "Records");
+            FileStream fs;
+
+            foreach (Record createdRecord in createdRecords)
             {
-                typeString = recordDirectory.Substring(recordDirectory.LastIndexOf('\\') + 1);
-                type = typeAssembly.GetType(typeAssembly.GetName().Name + "." + typeString);
+                fs = new FileStream(System.IO.Path.Combine(path, createdRecord.GetType().Name, createdRecord.GetKeyString()), FileMode.Create, FileAccess.Write);
+                createdRecord.WriteToFile(new StreamWriter(fs));
+            }
+            foreach (Record deletedRecord in deletedRecords)
+            {
 
-                recordsToAdd = new List<Record>();
-                foreach (string recordFile in Directory.GetFiles(recordDirectory))
-                {
-                    recordToAdd = (Record)Activator.CreateInstance(type);
-                    recordToAdd.ReadFromFile(new StreamReader(recordFile));
-                    recordsToAdd.Add(recordToAdd);
-                }
-
-                Records[type] = recordsToAdd;
             }
 
-            Relationship relationship;
-            string[] recordFields;
-            string recordTypeString;
-
-            foreach (string relationshipDirectory in Directory.GetDirectories(System.IO.Path.Combine(path, "Relationships")))
+            path = System.IO.Path.Combine(Path, "Relationshops");
+            foreach (Relationship addedRelationship in addedRelationships)
             {
-                typeString = relationshipDirectory.Substring(relationshipDirectory.LastIndexOf('\\') + 1);
-                typeAssembly = typeof(T).Assembly;
-                type = typeAssembly.GetType(typeAssembly.GetName().Name + "." + typeString);
-                Relationships.Add(type, new List<Relationship>());
-
-                foreach (string relationshipFile in Directory.GetFiles(relationshipDirectory))
-                {
-                    relationship = (Relationship)Activator.CreateInstance(type);
-
-                    recordTypeString = typeString.Substring(0, typeString.IndexOf('_'));
-                    recordFields = relationshipFile.Substring(relationshipFile.LastIndexOf('\\') + 1, relationshipFile.LastIndexOf('.') - relationshipFile.LastIndexOf('\\') - 1).Split('^');
-                    recordToAdd = (Record)typeof(DataBase).GetMethod("FindByKey").MakeGenericMethod(typeAssembly.GetType(typeAssembly.GetName().Name + "." + recordTypeString)).Invoke(this, new object[] { recordFields });
-
-                    recordsToAdd = new List<Record>();
-                    recordTypeString = typeString.Substring(typeString.IndexOf('_') + 1);
-                    foreach (string recordString in File.ReadAllLines(relationshipFile))
-                        recordsToAdd.Add((Record)typeof(DataBase).GetMethod("FindByKey").MakeGenericMethod(typeAssembly.GetType(typeAssembly.GetName().Name + "." + recordTypeString)).Invoke(this, new object[] { recordString.Split('^') }));
-
-                    relationship.AddMembers(recordToAdd, recordsToAdd.ToArray());
-
-                    Relationships[type].Add(relationship);
-                }
+                
+            }
+            foreach (Relationship changedRelationship in changedRelationships)
+            {
+                
             }
         }
     }

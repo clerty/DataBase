@@ -14,7 +14,8 @@ namespace ConsoleDB
         static void Main(string[] args)
         {
             cmp = new Сompany();
-            cmp.Fill<Сompany>(System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Сompany"));
+            cmp.Fill(System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Сompany"));
+
             //cmp.CreateNew(System.AppDomain.CurrentDomain.BaseDirectory);
             //Record cus1 = cmp.Create<Customer>("Daniil", "DU");
             //Record cus2 = cmp.Create<Customer>("Daniil", "Ufa");
